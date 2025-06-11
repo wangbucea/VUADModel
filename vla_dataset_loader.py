@@ -20,7 +20,8 @@ class VLADataset(Dataset):
                  action_sequence_length: int = 30,
                  key_frames: List[int] = [128, 129, 130, 131, 134],
                  key_frame_shuffle_range: int = 15,
-                 transform=None):
+                 transform=None,
+                 normalize_actions: bool = True):
         """
         初始化数据集
         
@@ -31,6 +32,7 @@ class VLADataset(Dataset):
             key_frames: 关键帧索引列表
             key_frame_shuffle_range: 关键帧shuffle范围
             transform: 图像变换
+            normalize_actions: 是否对动作进行归一化
         """
         self.data_root = data_root
         self.sequence_length = sequence_length
@@ -38,6 +40,19 @@ class VLADataset(Dataset):
         self.key_frames = key_frames
         self.key_frame_shuffle_range = key_frame_shuffle_range
         self.transform = transform
+        self.normalize_actions = normalize_actions
+        
+        # 机械臂关节范围定义 [±178,±130,±135,±178,±128,±360] 度
+        # 夹爪范围 [0,1000]
+        self.joint_ranges = np.array([
+            [-178, 178],   # 关节1
+            [-130, 130],   # 关节2
+            [-135, 135],   # 关节3
+            [-178, 178],   # 关节4
+            [-128, 128],   # 关节5
+            [-360, 360],   # 关节6
+            [0, 1000]      # 夹爪
+        ], dtype=np.float32)
         
         # 类别映射
         self.class_to_idx = {'bottle': 0, 'brush': 1, 'cube': 2}
@@ -45,7 +60,125 @@ class VLADataset(Dataset):
         
         # 加载所有样本路径
         self.samples = self._load_samples()
+    
+    def normalize_action(self, action: np.ndarray) -> np.ndarray:
+        """
+        将机械臂动作归一化到[-1, 1]范围
         
+        Args:
+            action: 原始动作数据，形状为(7,) 或 (N, 7)
+        
+        Returns:
+            归一化后的动作数据
+        """
+        if not self.normalize_actions:
+            return action
+        
+        action = np.array(action, dtype=np.float32)
+        original_shape = action.shape
+        
+        # 确保action是2D数组
+        if action.ndim == 1:
+            action = action.reshape(1, -1)
+        
+        # 确保动作维度正确
+        if action.shape[-1] != 7:
+            # 如果维度不足7，用0填充
+            if action.shape[-1] < 7:
+                padding = np.zeros((action.shape[0], 7 - action.shape[-1]), dtype=np.float32)
+                action = np.concatenate([action, padding], axis=-1)
+            else:
+                # 如果维度超过7，截取前7维
+                action = action[:, :7]
+        
+        # 归一化到[-1, 1]范围
+        # normalized = 2 * (action - min_val) / (max_val - min_val) - 1
+        min_vals = self.joint_ranges[:, 0]  # 最小值
+        max_vals = self.joint_ranges[:, 1]  # 最大值
+        
+        # 避免除零错误
+        range_vals = max_vals - min_vals
+        range_vals = np.where(range_vals == 0, 1, range_vals)
+        
+        normalized_action = 2 * (action - min_vals) / range_vals - 1
+        
+        # 确保归一化后的值在[-1, 1]范围内
+        normalized_action = np.clip(normalized_action, -1, 1)
+        
+        # 恢复原始形状
+        if len(original_shape) == 1:
+            normalized_action = normalized_action.squeeze(0)
+        
+        return normalized_action
+    
+    def denormalize_action(self, normalized_action: np.ndarray) -> np.ndarray:
+        """
+        将归一化的动作反归一化到原始范围
+        
+        Args:
+            normalized_action: 归一化的动作数据，形状为(7,) 或 (N, 7)
+        
+        Returns:
+            反归一化后的动作数据
+        """
+        if not self.normalize_actions:
+            return normalized_action
+        
+        normalized_action = np.array(normalized_action, dtype=np.float32)
+        original_shape = normalized_action.shape
+        
+        # 确保action是2D数组
+        if normalized_action.ndim == 1:
+            normalized_action = normalized_action.reshape(1, -1)
+        
+        # 确保动作维度正确
+        if normalized_action.shape[-1] != 7:
+            if normalized_action.shape[-1] < 7:
+                padding = np.zeros((normalized_action.shape[0], 7 - normalized_action.shape[-1]), dtype=np.float32)
+                normalized_action = np.concatenate([normalized_action, padding], axis=-1)
+            else:
+                normalized_action = normalized_action[:, :7]
+        
+        # 反归一化：action = (normalized + 1) / 2 * (max_val - min_val) + min_val
+        min_vals = self.joint_ranges[:, 0]
+        max_vals = self.joint_ranges[:, 1]
+        range_vals = max_vals - min_vals
+        
+        action = (normalized_action + 1) / 2 * range_vals + min_vals
+        
+        # 确保反归一化后的值在有效范围内
+        action = np.clip(action, min_vals, max_vals)
+        
+        # 恢复原始形状
+        if len(original_shape) == 1:
+            action = action.squeeze(0)
+        
+        return action
+    
+    def _normalize_action_sequence(self, action_sequence: List) -> List:
+        """
+        归一化动作序列
+        
+        Args:
+            action_sequence: 动作序列列表
+        
+        Returns:
+            归一化后的动作序列
+        """
+        if not action_sequence or not self.normalize_actions:
+            return action_sequence
+        
+        normalized_sequence = []
+        for action in action_sequence:
+            if isinstance(action, (list, np.ndarray)) and len(action) > 0:
+                normalized_action = self.normalize_action(np.array(action))
+                normalized_sequence.append(normalized_action.tolist())
+            else:
+                # 如果动作为空或无效，使用零动作
+                normalized_sequence.append([0.0] * 7)
+        
+        return normalized_sequence
+
     def _load_samples(self) -> List[str]:
         """加载所有样本路径并排序"""
         james_dir = os.path.join(self.data_root, "james")
@@ -103,11 +236,28 @@ class VLADataset(Dataset):
             labels = []
             object_ids = []
             
+            # 图像尺寸（用于归一化）
+            image_width = 640
+            image_height = 480
+            
             for obj in data.get("objects", []):
                 # 转换bbox格式 [x1, y1, x2, y2]
                 top_left = obj["top_left"]
                 bottom_right = obj["bottom_right"]
-                box = [top_left[0], top_left[1], bottom_right[0], bottom_right[1]]
+                
+                # 归一化坐标到[0, 1]范围
+                x1_norm = top_left[0] / image_width
+                y1_norm = top_left[1] / image_height
+                x2_norm = bottom_right[0] / image_width
+                y2_norm = bottom_right[1] / image_height
+                
+                # 确保坐标在[0, 1]范围内
+                x1_norm = max(0, min(1, x1_norm))
+                y1_norm = max(0, min(1, y1_norm))
+                x2_norm = max(0, min(1, x2_norm))
+                y2_norm = max(0, min(1, y2_norm))
+                
+                box = [x1_norm, y1_norm, x2_norm, y2_norm]
                 
                 boxes.append(box)
                 labels.append(self.class_to_idx[obj["label"]])
@@ -134,7 +284,13 @@ class VLADataset(Dataset):
         
         try:
             mask = Image.open(mask_path)
-            return np.array(mask)
+            mask_array = np.array(mask)
+            
+            # 假设模型只有1个分割类别（背景=0，前景=1），但实际应该是2个类别
+            # 将所有非零值设为1，确保值在[0, 1]范围内
+            mask_array = np.where(mask_array > 0, 1, 0).astype(np.uint8)
+            
+            return mask_array
         except Exception as e:
             print(f"Error loading segmentation mask for {sample_id}, frame {frame_idx}: {e}")
             return None
@@ -215,15 +371,17 @@ class VLADataset(Dataset):
         action_start_idx = start_frame
         action_end_idx = action_start_idx + self.action_sequence_length
         
-        # Slave动作序列（输入）
+        # Slave动作序列（输入）- 应用归一化
         slave_sequence = slave_actions[action_start_idx:action_end_idx] if action_start_idx < len(slave_actions) else []
         slave_sequence = self._pad_sequence(slave_sequence, self.action_sequence_length)
+        slave_sequence = self._normalize_action_sequence(slave_sequence)
         
-        # Master动作序列（标签）
+        # Master动作序列（标签）- 应用归一化
         master_sequence = master_actions[action_start_idx:action_end_idx] if action_start_idx < len(master_actions) else []
         master_sequence = self._pad_sequence(master_sequence, self.action_sequence_length)
+        master_sequence = self._normalize_action_sequence(master_sequence)
         
-        # 机械臂当前状态（slave序列的第一帧）
+        # 机械臂当前状态（slave序列的第一帧）- 已归一化
         current_state = slave_sequence[0] if slave_sequence else [0] * 7  # 假设7维状态
         
         # 加载目标检测标签（使用序列中间帧）
@@ -233,11 +391,10 @@ class VLADataset(Dataset):
         # 加载语义分割掩码
         segmentation_mask = self._load_segmentation_mask(sample_id, detection_frame_idx)
         
-        # 生成关键帧标签 - 修改为[5, 7]形状
+        # 生成关键帧标签 - 修改为[5, 7]形状，应用归一化
         shuffled_key_frames = self._shuffle_key_frames(self.key_frames)
         
         # 创建[5, 7]形状的关键帧标签
-        # 5表示5个关键帧，7表示每个关键帧的状态维度（与机械臂状态维度一致）
         key_frame_labels = np.zeros((5, 7), dtype=np.float32)
         
         # 为每个关键帧设置对应的状态标签
@@ -265,7 +422,7 @@ class VLADataset(Dataset):
             'detection_labels': torch.tensor(detection_labels['labels'], dtype=torch.long),
             'detection_object_ids': torch.tensor(detection_labels['object_ids'], dtype=torch.long),
             'segmentation_mask': torch.tensor(segmentation_mask, dtype=torch.long) if segmentation_mask is not None else torch.zeros(640, 480, dtype=torch.long),
-            'key_frame_labels': torch.tensor(key_frame_labels, dtype=torch.float32),  # 现在形状是[5, 7]
+            'key_frame_labels': torch.tensor(key_frame_labels, dtype=torch.float32),  # 现在形状是[5, 7]，已归一化
             'start_frame': start_frame
         }
 
@@ -366,5 +523,4 @@ if __name__ == "__main__":
         print(f"  Segmentation mask shape: {batch['segmentation_mask'].shape}")
         print(f"  Key frame labels shape: {batch['key_frame_labels'].shape}")
         
-        if batch_idx == 0:  # 只打印第一个batch
-            break
+        # if batch_idx == 0:  # 只打印第一个batch
