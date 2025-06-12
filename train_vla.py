@@ -20,7 +20,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
-from vla_dataset_loader import create_vla_dataloader, VLADataset
+from vla_dataset_loader import create_vla_dataloader, VLADataset, collate_fn
 from VLAModel import RobotUniADModel
 from compute import HungarianMatcher, DETRLossComputer
 
@@ -164,7 +164,8 @@ class VLATrainer:
             shuffle=shuffle,
             sampler=train_sampler,
             num_workers=self.config['num_workers'],
-            pin_memory=True
+            pin_memory=True,
+            collate_fn=collate_fn  # 添加自定义collate函数
         )
         
         # 创建验证数据加载器（如果有验证数据）
@@ -192,7 +193,8 @@ class VLATrainer:
                 shuffle=False,
                 sampler=val_sampler,
                 num_workers=self.config['num_workers'],
-                pin_memory=True
+                pin_memory=True,
+                collate_fn=collate_fn  # 添加自定义collate函数
             )
         
         if self.rank == 0:
