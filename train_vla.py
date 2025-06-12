@@ -616,11 +616,16 @@ def setup_distributed(rank, world_size, backend='nccl'):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
     
-    # 初始化进程组
-    dist.init_process_group(backend, rank=rank, world_size=world_size)
-    
-    # 设置当前设备
+    # 设置当前设备（在初始化进程组之前）
     torch.cuda.set_device(rank)
+    
+    # 初始化进程组，指定device_id避免GPU映射警告
+    dist.init_process_group(
+        backend=backend, 
+        rank=rank, 
+        world_size=world_size,
+        device_id=torch.cuda.current_device()
+    )
 
 def cleanup_distributed():
     """清理分布式训练环境"""
