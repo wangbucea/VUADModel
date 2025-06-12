@@ -364,7 +364,12 @@ class VLATrainer:
             )
             
             # 计算损失
-            losses = self.model.compute_loss(outputs, targets)
+            if hasattr(self.model, 'module'):
+                # 分布式训练中，模型被包装在DDP中
+                losses = self.model.module.compute_loss(outputs, targets)
+            else:
+                # 单GPU训练
+                losses = self.model.compute_loss(outputs, targets)
             total_loss = losses['total_loss']
             seg_loss = losses['seg_loss']
             det_box_loss = losses['det_bbox_loss']
@@ -480,7 +485,12 @@ class VLATrainer:
                 )
                 
                 # 计算损失
-                losses = self.model.compute_loss(outputs, targets)
+                if hasattr(self.model, 'module'):
+                    # 分布式训练中，模型被包装在DDP中
+                    losses = self.model.module.compute_loss(outputs, targets)
+                else:
+                    # 单GPU训练
+                    losses = self.model.compute_loss(outputs, targets)
                 total_loss = losses['total_loss']
                 
                 epoch_losses.append(total_loss.item())
