@@ -2,7 +2,7 @@ import os
 import json
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List
 
 import torch
@@ -108,7 +108,15 @@ class VLATrainer:
         
         # 使用DistributedDataParallel包装模型
         if self.is_distributed:
-            model = DDP(model, device_ids=[self.rank], output_device=self.rank, find_unused_parameters=True)
+            model = DDP(
+                model, 
+                device_ids=[self.rank], 
+                output_device=self.rank, 
+                find_unused_parameters=True,
+                broadcast_buffers=False,  # 减少通信开销
+                bucket_cap_mb=25,  # 减少bucket大小
+                gradient_as_bucket_view=True  # 优化内存使用
+            )
         
         # 打印模型参数数量（只在主进程中打印）
         if self.rank == 0:
@@ -319,9 +327,14 @@ class VLATrainer:
         epoch_det_ce = 0.0
         epoch_point = 0.0
         epoch_action = 0.0
+        
         # 分布式训练时设置sampler的epoch
         if self.is_distributed and hasattr(self.train_loader.sampler, 'set_epoch'):
             self.train_loader.sampler.set_epoch(self.current_epoch)
+            
+        # 同步所有进程，确保epoch开始时所有进程都准备好
+        if self.is_distributed:
+            dist.barrier()
         
         # 只在主进程显示进度条
         if self.rank == 0:
@@ -366,12 +379,21 @@ class VLATrainer:
             # 反向传播
             total_loss.backward()
             
+            # 分布式训练时同步梯度
+            if self.is_distributed:
+                # 确保所有进程的梯度计算完成
+                dist.barrier()
+            
             # 梯度裁剪
             if self.config['grad_clip_norm'] > 0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip_norm'])
             
             self.optimizer.step()
             self.scheduler.step()
+            
+            # 分布式训练时在每个batch后同步
+            if self.is_distributed and batch_idx % 10 == 0:  # 每10个batch同步一次
+                dist.barrier()
             
             # 记录损失
             epoch_losses.append(total_loss.item())
@@ -402,8 +424,19 @@ class VLATrainer:
                     if loss_name != 'total_loss':
                         self.writer.add_scalar(f'Train/{loss_name}', loss_value.item(), global_step)
         
+        # 分布式训练时确保所有进程完成epoch
+        if self.is_distributed:
+            dist.barrier()
+            
         avg_loss = np.mean(epoch_losses)
         self.train_losses.append(avg_loss)
+        
+        # 分布式训练时同步损失值
+        if self.is_distributed:
+            # 将损失转换为tensor并同步
+            loss_tensor = torch.tensor(avg_loss, device=self.device)
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
+            avg_loss = loss_tensor.item()
         
         return avg_loss
         
@@ -616,6 +649,12 @@ def setup_distributed(rank, world_size, backend='nccl'):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
     
+    # 设置NCCL超时和调试选项
+    os.environ['TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC'] = '1800'  # 30分钟超时
+    os.environ['TORCH_NCCL_ENABLE_MONITORING'] = '1'
+    os.environ['NCCL_DEBUG'] = 'INFO'
+    os.environ['NCCL_TIMEOUT'] = '1800'
+    
     # 设置当前设备（在初始化进程组之前）
     torch.cuda.set_device(rank)
     
@@ -624,7 +663,8 @@ def setup_distributed(rank, world_size, backend='nccl'):
         backend=backend, 
         rank=rank, 
         world_size=world_size,
-        device_id=torch.device(f'cuda:{rank}')
+        device_id=torch.device(f'cuda:{rank}'),
+        timeout=timedelta(seconds=1800)  # 30分钟超时
     )
 
 def cleanup_distributed():
