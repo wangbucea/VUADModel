@@ -106,7 +106,8 @@ class VLATrainer:
             batch_size=self.config['batch_size'],
             shuffle=True,
             num_workers=self.config['num_workers'],
-            transform=transform
+            transform=transform,
+            stride=1
         )
         
         # 验证数据加载器（这里简化为使用相同数据，实际应该分离）
@@ -115,7 +116,8 @@ class VLATrainer:
             batch_size=self.config['batch_size'],
             shuffle=False,
             num_workers=self.config['num_workers'],
-            transform=transform
+            transform=transform,
+            stride=1
         )
         
         self.logger.info(f"Train dataset size: {len(train_loader.dataset)}")
@@ -238,7 +240,12 @@ class VLATrainer:
         """训练一个epoch"""
         self.model.train()
         epoch_losses = []
-        
+        epoch_total = 0.0
+        epoch_seg = 0.0
+        epoch_det_bbox = 0.0
+        epoch_det_ce = 0.0
+        epoch_point = 0.0
+        epoch_action = 0.0
         progress_bar = tqdm(self.train_loader, desc=f'Epoch {self.current_epoch}')
         for batch_idx, batch in enumerate(progress_bar):
             # 准备输入数据
@@ -262,6 +269,18 @@ class VLATrainer:
             # 计算损失
             losses = self.model.compute_loss(outputs, targets)
             total_loss = losses['total_loss']
+            seg_loss = losses['seg_loss']
+            det_box_loss = losses['det_bbox_loss']
+            det_ce_loss = losses['det_ce_loss']
+            point_loss = losses['point_loss']
+            trajectory_loss = losses['trajectory_loss']
+            epoch_total += total_loss
+            epoch_seg += seg_loss
+            epoch_det_bbox += det_box_loss
+            epoch_det_ce += det_ce_loss
+            epoch_point += point_loss
+            epoch_action += trajectory_loss
+
             
             # 反向传播
             total_loss.backward()
@@ -280,11 +299,16 @@ class VLATrainer:
             current_lr_backbone = self.optimizer.param_groups[0]['lr']
             current_lr_other = self.optimizer.param_groups[1]['lr']
             progress_bar.set_postfix({
-                'Loss': f'{total_loss.item():.4f}',
+                'Loss': f'{epoch_total.item():.4f}',
+                'seg': f'{epoch_seg.item():.4f}',
+                'box': f'{epoch_det_bbox.item():.4f}',
+                'ce': f'{epoch_det_ce.item():.4f}',
+                'point': f'{epoch_point.item():.4f}',
+                'actions': f'{epoch_action.item():.4f}',
                 'LR_backbone': f'{current_lr_backbone:.2e}',
                 'LR_other': f'{current_lr_other:.2e}'
             })
-            
+
             # 记录到TensorBoard
             global_step = self.current_epoch * len(self.train_loader) + batch_idx
             self.writer.add_scalar('Train/Total_Loss', total_loss.item(), global_step)
@@ -433,8 +457,8 @@ class VLATrainer:
             # 日志记录
             self.logger.info(
                 f"Epoch {epoch+1}/{self.config['num_epochs']} - "
-                f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, "
-                f"Best Loss: {self.best_loss:.4f}"
+                f"Train Loss: {train_loss:.4f}"
+                # f"Best Loss: {self.best_loss:.4f}"
             )
             
             # 早停检查（可选）
@@ -455,13 +479,13 @@ def main():
     # 训练配置
     config = {
         # 数据配置
-        'data_root': 'c:/DiskD/trae_doc/VLA',
-        'batch_size': 4,
-        'num_workers': 0,
-        'image_size': (640, 480),
+        'data_root': './',
+        'batch_size': 3,
+        'num_workers': 2,
+        'image_size': (480, 640),
         
         # 模型配置
-        'num_seg_classes': 1, 
+        'num_seg_classes': 2,
         'num_det_classes': 3,  # bottle, brush, cube
         'num_seg_queries': 100,
         'num_det_queries': 100,
@@ -472,16 +496,16 @@ def main():
         'use_dual_view': True,
         
         # 训练配置
-        'num_epochs': 500,
-        'learning_rate': 1e-5,
-        'backbone_lr': 1e-6,
+        'num_epochs': 100,
+        'learning_rate': 1e-4,
+        'backbone_lr': 1e-5,
         'weight_decay': 1e-5,
-        'warmup_epochs': 5,
+        'warmup_epochs': 10,
         'grad_clip_norm': 1.0,
         
         # 保存配置
-        'save_dir': 'c:/DiskD/trae_doc/VLA/experiments/' + datetime.now().strftime('%Y%m%d_%H%M%S'),
-        'save_freq': 10,  # 每10个epoch保存一次
+        'save_dir': './experiments/' + datetime.now().strftime('%Y%m%d_%H%M%S'),
+        'save_freq': 500,  # 每10个epoch保存一次
         'resume': False,
         
         # 其他配置
