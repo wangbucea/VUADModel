@@ -624,7 +624,7 @@ def setup_distributed(rank, world_size, backend='nccl'):
         backend=backend, 
         rank=rank, 
         world_size=world_size,
-        device_id=torch.cuda.current_device()
+        device_id=torch.device(f'cuda:{rank}')
     )
 
 def cleanup_distributed():
